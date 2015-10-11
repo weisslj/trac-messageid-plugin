@@ -16,10 +16,11 @@ from genshi.builder import tag
 from trac.core import implements, Component, TracError
 from trac.config import Option, IntOption, BoolOption, ConfigurationError
 from trac.env import IEnvironmentSetupParticipant
-from trac.notification import IEmailSender
 from trac.db import DatabaseManager
 from trac.util.text import CRLF, fix_eol, to_unicode
 from trac.util.translation import _, tag_
+from trac.notification.api import IEmailSender, IEmailDecorator
+from trac.notification.mail import set_header
 
 import db_default
 
@@ -49,10 +50,10 @@ def sendmail(server, from_addr, to_addrs, msg):
         raise smtplib.SMTPDataError(code, resp)
     return resp
 
-# Based on trac.notification.SmtpEmailSender() of Trac 1.0.10.
+# Based on trac.notification.mail.SmtpEmailSender() of Trac 1.1.3.
 class MessageIdSmtpEmailSender(Component):
 
-    implements(IEnvironmentSetupParticipant, IEmailSender)
+    implements(IEnvironmentSetupParticipant, IEmailSender, IEmailDecorator)
 
     smtp_server = Option('notification', 'smtp_server', 'localhost',
         """SMTP server hostname to use for email notifications.""")
@@ -61,13 +62,13 @@ class MessageIdSmtpEmailSender(Component):
         """SMTP server port to use for email notification.""")
 
     smtp_user = Option('notification', 'smtp_user', '',
-        """Username for SMTP server. (''since 0.9'')""")
+        """Username for authenticating with SMTP server.""")
 
     smtp_password = Option('notification', 'smtp_password', '',
-        """Password for SMTP server. (''since 0.9'')""")
+        """Password for authenticating with SMTP server.""")
 
     use_tls = BoolOption('notification', 'use_tls', 'false',
-        """Use SSL/TLS to send notifications over SMTP. (''since 0.10'')""")
+        """Use SSL/TLS to send notifications over SMTP.""")
 
     # IEmailSender methods
     def send(self, from_addr, recipients, message):
@@ -78,20 +79,20 @@ class MessageIdSmtpEmailSender(Component):
                       self.smtp_server, self.smtp_port, recipients)
         try:
             server = smtplib.SMTP(self.smtp_server, self.smtp_port)
-        except smtplib.socket.error, e:
+        except smtplib.socket.error as e:
             raise ConfigurationError(
                 tag_("SMTP server connection error (%(error)s). Please "
                      "modify %(option1)s or %(option2)s in your "
                      "configuration.",
                      error=to_unicode(e),
-                     option1=tag.tt("[notification] smtp_server"),
-                     option2=tag.tt("[notification] smtp_port")))
+                     option1=tag.code("[notification] smtp_server"),
+                     option2=tag.code("[notification] smtp_port")))
         # server.set_debuglevel(True)
         if self.use_tls:
             server.ehlo()
             if 'starttls' not in server.esmtp_features:
-                raise TracError(_("TLS enabled but server does not support "
-                                  "TLS"))
+                raise TracError(_("TLS enabled but server does not support"
+                                  " TLS"))
             server.starttls()
             server.ehlo()
         if self.smtp_user:
@@ -101,8 +102,8 @@ class MessageIdSmtpEmailSender(Component):
         resp = sendmail(server, from_addr, recipients, message)
         t = time.time() - start
         if t > 5:
-            self.log.warning('Slow mail submission (%.2f s), '
-                             'check your mail setup', t)
+            self.log.warning("Slow mail submission (%.2f s), "
+                             "check your mail setup", t)
         if self.use_tls:
             # avoid false failure detection when the server closes
             # the SMTP connection with TLS enabled
@@ -131,50 +132,33 @@ class MessageIdSmtpEmailSender(Component):
                 VALUES (%s, %s)
                 """, (ticket_id, msgid))
 
+    # IEmailDecorator method
+    def decorate_message(self, event, message, charset):
+        if event.realm == 'ticket' and event.category != 'created':
+            rows = self.env.db_query("""
+                    SELECT messageid FROM messageid WHERE ticket=%s
+                    """, (event.target.id,))
+            if rows:
+                msgid = rows[0][0]
+                set_header(message, 'In-Reply-To', msgid, charset)
+                set_header(message, 'References', msgid, charset)
+
     # IEnvironmentSetupParticipant method
     def environment_created(self):
-        if self.environment_needs_upgrade():
-            self.upgrade_environment()
+        self.create_initial_database()
 
     # IEnvironmentSetupParticipant method
-    def environment_needs_upgrade(self, _unused_db=None):
-        return self.database_needs_upgrade(db_default.version, db_default.name)
-
-    # IEnvironmentSetupParticipant method
-    def upgrade_environment(self, _unused_db=None):
+    def environment_needs_upgrade(self):
         dbm = DatabaseManager(self.env)
-        if self.get_database_version(db_default.name) == 0:
-            dbm.create_tables(db_default.tables)
-            self.set_database_version(db_default.version, db_default.name)
+        return dbm.needs_upgrade(db_default.version, db_default.name)
 
-    # DatabaseManager.get_database_version() from Trac 1.1.
-    def get_database_version(self, name):
-        rows = self.env.db_query("""
-                SELECT value FROM system WHERE name=%s
-                """, (name,))
-        return int(rows[0][0]) if rows else False
+    # IEnvironmentSetupParticipant method
+    def upgrade_environment(self):
+        dbm = DatabaseManager(self.env)
+        if dbm.get_database_version(db_default.name) == 0:
+            self.create_initial_database()
 
-    # DatabaseManager.set_database_version() from Trac 1.1.
-    def set_database_version(self, version, name):
-        current_database_version = self.get_database_version(name)
-        if current_database_version is False:
-            self.env.db_transaction("""
-                    INSERT INTO system (name, value) VALUES (%s, %s)
-                    """, (name, version))
-        else:
-            self.env.db_transaction("""
-                    UPDATE system SET value=%s WHERE name=%s
-                    """, (version, name))
-            self.log.info("Upgraded %s from %d to %d",
-                          name, current_database_version, version)
-
-    # DatabaseManager.needs_upgrade() from Trac 1.1.
-    def database_needs_upgrade(self, version, name):
-        dbver = self.get_database_version(name)
-        if dbver == version:
-            return False
-        elif dbver > version:
-            raise TracError(_("Need to downgrade %(name)s.", name=name))
-        self.log.info("Need to upgrade %s from %d to %d",
-                      name, dbver, version)
-        return True
+    def create_initial_database(self):
+        dbm = DatabaseManager(self.env)
+        dbm.create_tables(db_default.tables)
+        dbm.set_database_version(db_default.version, db_default.name)

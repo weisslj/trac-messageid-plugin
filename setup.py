@@ -11,14 +11,14 @@ from setuptools import find_packages, setup
 
 setup(
     name = 'TracMessageIdPlugin',
-    version = '1.0.0',
+    version = '1.1.0',
     keywords = 'trac plugin messageid message id aws ses',
     author = 'Johannes Weißl',
     author_email = 'jargon@molb.org',
     url = 'https://github.com/weisslj/trac-messageid-plugin',
     description = 'Trac Message-ID Plugin',
     long_description = """
-    This plugin for Trac 1.0 stores the Message-ID of new ticket
+    This plugin for Trac >= 1.1.3 stores the Message-ID of new ticket
     notifications in a new database table, so that they can be
     used for the In-Reply-To header of subsequent emails.
 
@@ -28,7 +28,7 @@ setup(
     thread).
     """,
     license = 'BSD',
-    install_requires = ['Trac >= 1.0'],
+    install_requires = ['Trac >= 1.1.3'],
     packages = find_packages(exclude=['*.tests*']),
     entry_points = {
         'trac.plugins': [
