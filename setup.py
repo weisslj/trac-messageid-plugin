@@ -34,5 +34,8 @@ setup(
         'trac.plugins': [
             'tracmessageid.api = tracmessageid.api',
         ],
+        'console_scripts': [
+            'fill-trac-messageid = tracmessageid.fill:main',
+        ],
     },
 )
